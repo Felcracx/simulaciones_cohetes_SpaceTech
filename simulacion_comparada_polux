@@ -1,0 +1,193 @@
+
+
+import runpy
+import sys
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+from rocketpy import Flight
+
+
+def encontrar_carpeta(incluir, excluir=(), base="."):
+    
+    base = Path(base)
+    for carpeta in sorted(base.iterdir()):
+        if not carpeta.is_dir():
+            continue
+        nombre = carpeta.name.lower()
+        if all(p in nombre for p in incluir) and not any(p in nombre for p in excluir):
+            return carpeta
+    disponibles = ", ".join(c.name for c in base.iterdir() if c.is_dir())
+    raise RuntimeError(
+        f"No encontre ninguna carpeta que contenga {incluir} y no contenga "
+        f"{excluir}. Carpetas disponibles en '{base.resolve()}': {disponibles}"
+    )
+
+CARPETA_OPENROCKET = encontrar_carpeta(incluir=["pollux", "open"])
+CARPETA_ROCKETSIM = encontrar_carpeta(incluir=["pollux"], excluir=["open"])
+print("Carpeta OpenRocket detectada:", CARPETA_OPENROCKET)
+print("Carpeta RocketSim/Rockersim detectada:", CARPETA_ROCKETSIM)
+
+RUTA_ROCKETSIM = CARPETA_ROCKETSIM / "main.py"
+RUTA_OPENROCKET = CARPETA_OPENROCKET / "main.py"
+
+MODULOS_LOCALES = ["environment", "flight", "motor", "rocket", "main"]
+
+
+def obtener_flight(ruta_main):
+    """Ejecuta un main.py (agregando su carpeta a sys.path para que sus
+    imports 'from flight import flight' etc. funcionen) y devuelve el
+    primer objeto Flight que encuentre entre sus variables globales.
+
+    Mientras main.py corre, se desactiva plt.show() para que si adentro
+    llaman a flight.all_info() / flight.plots.trajectory_3d() (que abren
+    su propia ventana y BLOQUEAN la ejecucion hasta que la cierres), no
+    se abra ninguna ventana y el script pueda seguir corriendo solo."""
+    carpeta = str(ruta_main.parent.resolve())
+    sys.path.insert(0, carpeta)
+
+    show_original = plt.show
+    plt.show = lambda *args, **kwargs: None  # no-op mientras corre main.py
+    try:
+        namespace = runpy.run_path(str(ruta_main), run_name="__main__")
+    finally:
+        plt.show = show_original
+        sys.path.remove(carpeta)
+        plt.close("all")  
+        for nombre in MODULOS_LOCALES:
+            sys.modules.pop(nombre, None)
+
+    for nombre, valor in namespace.items():
+        if isinstance(valor, Flight):
+            print(f"[{ruta_main.parent.name}] usando variable '{nombre}' como Flight")
+            return valor
+    raise RuntimeError(
+        f"No se encontro ningun objeto Flight en {ruta_main}. "
+        "Revisa que main.py cree y guarde la simulacion en una variable "
+        "(ej. test_flight = Flight(...))."
+    )
+
+
+flight_rocketsim = obtener_flight(RUTA_ROCKETSIM)
+flight_openrocket = obtener_flight(RUTA_OPENROCKET)
+
+
+print("id RocketSim:", id(flight_rocketsim), " | id OpenRocket:", id(flight_openrocket))
+print(
+    "Apogeo RocketSim:", flight_rocketsim.apogee,
+    " | Apogeo OpenRocket:", flight_openrocket.apogee,
+)
+print(
+    "Puntos de tiempo RocketSim:", len(flight_rocketsim.time),
+    " | Puntos de tiempo OpenRocket:", len(flight_openrocket.time),
+)
+
+import numpy as np
+
+
+def trayectoria_3d(flight):
+  
+    x = flight.x.source[:, 1]
+    y = flight.y.source[:, 1]
+    z = flight.z.source[:, 1] - flight.env.elevation
+    return x, y, z
+
+
+x_a, y_a, z_a = trayectoria_3d(flight_rocketsim)
+x_b, y_b, z_b = trayectoria_3d(flight_openrocket)
+
+
+margen = 1.1
+x_min = min(min(x_a), min(x_b), 0) * margen
+x_max = max(max(x_a), max(x_b)) * margen
+y_min = min(min(y_a), min(y_b), 0) * margen
+y_max = max(max(y_a), max(y_b)) * margen
+z_max = max(max(z_a), max(z_b)) * margen
+
+fig3d = plt.figure(figsize=(9, 8))
+ax3d = fig3d.add_subplot(projection="3d")
+
+
+def dibujar_con_sombras(x, y, z, color, linestyle, etiqueta):
+    # Trayectoria real
+    ax3d.plot(x, y, z, label=etiqueta, color=color, linestyle=linestyle, linewidth=2.5, zorder=5)
+    # Sombra sobre la pared X = x_min (vista Y-Z)
+    ax3d.plot([x_min] * len(y), y, z, color=color, linestyle=linestyle, linewidth=1.2, alpha=0.5)
+    # Sombra sobre la pared Y = y_max (vista X-Z)
+    ax3d.plot(x, [y_max] * len(x), z, color=color, linestyle=linestyle, linewidth=1.2, alpha=0.5)
+    # Sombra sobre el piso Z = 0 (vista X-Y)
+    ax3d.plot(x, y, [0] * len(z), color=color, linestyle=linestyle, linewidth=1.2, alpha=0.5)
+    # Punto de aterrizaje
+    ax3d.scatter([x[-1]], [y[-1]], [z[-1]], color=color, marker="x", s=60, zorder=6)
+
+
+dibujar_con_sombras(x_a, y_a, z_a, "#4C72B0", "-", "RocketSim (Pollux)")
+dibujar_con_sombras(x_b, y_b, z_b, "#DD8452", "--", "OpenRocket (Pollux)")
+
+ax3d.set_xlim(x_min, x_max)
+ax3d.set_ylim(y_min, y_max)
+ax3d.set_zlim(0, z_max)
+ax3d.set_xlabel("X - Este (m)")
+ax3d.set_ylabel("Y - Norte (m)")
+ax3d.set_zlabel("Altura sobre el suelo (m)")
+ax3d.set_title("Trayectoria de vuelo: RocketSim vs OpenRocket (Pollux)")
+ax3d.legend()
+plt.tight_layout()
+plt.savefig("comparacion_trayectoria_3d_pollux.png", dpi=150)
+plt.show()
+
+
+
+def curva(flight, atributo):
+    """Devuelve (tiempo, valores) para un atributo tipo Function del Flight."""
+    tiempo = flight.time
+    valores = [getattr(flight, atributo)(t) for t in tiempo]
+    return tiempo, valores
+
+
+atributos = [("z", "Altura (m)"), ("speed", "Velocidad (m/s)"), ("acceleration", "Aceleracion (m/s^2)")]
+
+fig, axes = plt.subplots(len(atributos), 1, figsize=(9, 10), sharex=True)
+for ax, (atributo, etiqueta) in zip(axes, atributos):
+    t_a, v_a = curva(flight_rocketsim, atributo)
+    t_b, v_b = curva(flight_openrocket, atributo)
+    ax.plot(t_a, v_a, label="RocketSim (Pollux)", color="#4C72B0",
+            linestyle="-", linewidth=2.5, alpha=0.9, zorder=2)
+    ax.plot(t_b, v_b, label="OpenRocket (Pollux)", color="#DD8452",
+            linestyle="--", linewidth=2.5, alpha=0.9, zorder=3)
+    ax.set_ylabel(etiqueta)
+    ax.legend()
+    ax.grid(alpha=0.3)
+axes[-1].set_xlabel("Tiempo (s)")
+plt.tight_layout()
+plt.savefig("comparacion_curvas_pollux.png", dpi=150)
+plt.show()
+
+
+
+def estadisticas(flight):
+    return {
+        "Apogeo (m)": flight.apogee - flight.env.elevation,
+        "Vel. maxima (m/s)": flight.max_speed,
+        "Vel. salida de riel (m/s)": flight.out_of_rail_velocity,
+        "Tiempo de vuelo (s)": flight.t_final,
+        "Aceleracion maxima (m/s^2)": flight.max_acceleration,
+    }
+
+
+stats_a = estadisticas(flight_rocketsim)
+stats_b = estadisticas(flight_openrocket)
+
+labels = list(stats_a.keys())
+valores_a = list(stats_a.values())
+valores_b = [stats_b[k] for k in labels]
+
+fig, axes = plt.subplots(1, len(labels), figsize=(4 * len(labels), 4))
+for ax, label, va, vb in zip(axes, labels, valores_a, valores_b):
+    ax.bar(["RocketSim", "OpenRocket"], [va, vb], color=["#4C72B0", "#DD8452"])
+    ax.set_title(label, fontsize=10)
+    ax.bar_label(ax.containers[0], fmt="%.1f")
+
+plt.tight_layout()
+plt.savefig("comparacion_pollux.png", dpi=150)
+plt.show()
